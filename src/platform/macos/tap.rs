@@ -68,6 +68,7 @@ const CGEVENT_FLAG_ALT_RIGHT: u64 = 0x00080040;
 const CGEVENT_FLAG_META_LEFT: u64 = 0x00100008;
 const CGEVENT_FLAG_META_RIGHT: u64 = 0x00100010;
 const CGEVENT_FLAG_CAPS_LOCK: u64 = 0x00010000;
+const CGEVENT_FLAG_FUNCTION: u64 = 0x800000; // kCGEventFlagMaskSecondaryFn — macOS Fn
 
 /// Heap-allocated context pointed to by the CGEventTap's `user_info`.
 /// Lives for the full lifetime of the tap. Freed in [`ShutdownGuard::drop`]
@@ -373,6 +374,7 @@ fn flag_bit_for_key(key: Key) -> u64 {
         Key::MetaLeft => CGEVENT_FLAG_META_LEFT,
         Key::MetaRight => CGEVENT_FLAG_META_RIGHT,
         Key::CapsLock => CGEVENT_FLAG_CAPS_LOCK,
+        Key::Function => CGEVENT_FLAG_FUNCTION,
         _ => 0,
     }
 }
