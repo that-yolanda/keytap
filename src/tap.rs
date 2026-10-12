@@ -74,6 +74,9 @@ pub struct TapBuilder {
     pub(crate) linux_hotplug_interval: Duration,
     pub(crate) macos_no_repeat_detection: bool,
     pub(crate) shutdown_timeout: Duration,
+    /// Whether the tap may swallow events (see [`crate::suppress`]).
+    /// Off by default to preserve the historical observe-only behavior.
+    pub(crate) filter_events: bool,
 }
 
 impl Default for TapBuilder {
@@ -84,6 +87,7 @@ impl Default for TapBuilder {
             linux_hotplug_interval: Duration::from_secs(1),
             macos_no_repeat_detection: false,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+            filter_events: false,
         }
     }
 }
@@ -111,6 +115,15 @@ impl TapBuilder {
 
     pub fn shutdown_timeout(mut self, d: Duration) -> Self {
         self.shutdown_timeout = d;
+        self
+    }
+
+    /// Allow this tap to swallow suppressed keys (macOS only today: switches
+    /// the underlying `CGEventTap` from listen-only to an active filtering
+    /// tap, which requires the Accessibility permission). The suppressed set
+    /// itself is controlled via [`crate::set_suppressed_keys`].
+    pub fn filter_events(mut self) -> Self {
+        self.filter_events = true;
         self
     }
 

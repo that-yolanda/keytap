@@ -25,6 +25,7 @@ mod event;
 mod key;
 mod log;
 mod platform;
+mod suppress;
 mod tap;
 
 #[cfg(feature = "chord")]
@@ -33,6 +34,7 @@ pub mod chord;
 pub use error::Error;
 pub use event::{Event, EventKind};
 pub use key::{Key, RawCode};
+pub use suppress::{set_suppressed_keys, suppressed_keys};
 pub use tap::{Tap, TapBuilder, TapIter};
 
 // Compile-time guarantees that the public types used across threads are

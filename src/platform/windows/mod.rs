@@ -188,6 +188,12 @@ unsafe extern "system" fn raw_callback(code: i32, wparam: WPARAM, lparam: LPARAM
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
+        // Suppressed keys are still reported to the receiver; returning 1
+        // without calling CallNextHookEx keeps them from the foreground.
+        // Both the down and the up are swallowed so the foreground app never
+        // sees a half-processed key press.
+        let swallow = (is_down || is_up) && crate::suppress::is_suppressed(key);
+
         THREAD_CTX.with(|cell| {
             if let Some(ctx) = cell.borrow_mut().as_mut() {
                 let kind = if is_down {
@@ -217,8 +223,11 @@ unsafe extern "system" fn raw_callback(code: i32, wparam: WPARAM, lparam: LPARAM
                 }
             }
         });
+
+        if swallow {
+            return 1;
+        }
     }
-    // Always forward; we're observe-only.
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 

@@ -76,6 +76,13 @@ const CGEVENT_FLAG_FUNCTION: u64 = 0x800000; // kCGEventFlagMaskSecondaryFn — 
 struct CallbackContext {
     tx: Sender<Event>,
     macos_no_repeat_detection: bool,
+    /// Whether this tap may swallow events (active vs listen-only tap).
+    filter_events: bool,
+    /// The tap's own `CFMachPort`, stored so the callback can re-enable the
+    /// tap after the system disables it for a slow callback (the standard
+    /// active-tap `TapDisabledByTimeout` dance). Null until the worker thread
+    /// finishes creating the tap.
+    tap_port: AtomicPtr<CFMachPort>,
     /// Previous CGEventFlags value — used to detect modifier press/release
     /// edges in FlagsChanged events.
     last_flags: std::sync::atomic::AtomicU64,
@@ -150,6 +157,12 @@ pub(crate) fn start(tx: Sender<Event>, cfg: &TapBuilder) -> Result<ShutdownGuard
     log::debug!("keytap: starting macOS CGEventTap");
     // Proactive permission check. On denial, fail fast with a typed error
     // instead of silently producing no events (the #1 rdev complaint).
+    // Only the listen grant is probed: the filtering (active) tap's real
+    // requirement is the Accessibility TCC record, which IOHIDCheckAccess
+    // does not see — probing PostEvent here misjudges machines that hold
+    // Accessibility. CGEventTapCreate itself is the authoritative check for
+    // the active tap; on a null return the caller gets the error and can
+    // fall back to listen-only.
     let access = unsafe { IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN) };
     if access != K_IOHID_ACCESS_TYPE_GRANTED {
         log::debug!("keytap: IOHIDCheckAccess denied (access={})", access);
@@ -159,6 +172,8 @@ pub(crate) fn start(tx: Sender<Event>, cfg: &TapBuilder) -> Result<ShutdownGuard
     let ctx = Box::new(CallbackContext {
         tx,
         macos_no_repeat_detection: cfg.macos_no_repeat_detection,
+        filter_events: cfg.filter_events,
+        tap_port: AtomicPtr::new(ptr::null_mut()),
         last_flags: std::sync::atomic::AtomicU64::new(0),
     });
     let ctx_ptr = Box::into_raw(ctx);
@@ -209,19 +224,32 @@ fn run_tap_thread(
     rl_tx: Sender<Result<SendableRunLoopPtr, Error>>,
     ready: Arc<AtomicBool>,
 ) {
-    // Keyboard events only: KeyDown | KeyUp | FlagsChanged.
-    // (We start with kCGEventMaskForAllEvents to match rdev's behavior and
-    // let the callback do its own filtering — simpler and avoids mis-masking
-    // events that come through as FlagsChanged for modifier-only combinations.)
+    // SAFETY: this thread is the only writer of the context until the
+    // handshake completes; the C callback only starts firing once the tap is
+    // enabled below.
+    let ctx: &CallbackContext = unsafe { &*ctx_ptr };
+
+    // Keyboard events only: KeyDown | KeyUp | FlagsChanged. The tap-disabled
+    // notices need no mask bits — their enum values are sentinel constants
+    // (0xFFFFFFFE/0xFFFFFFFF), not shiftable event ids; the system delivers
+    // them to an active tap's callback regardless, and the callback's match
+    // re-enables the tap there.
     let mask: u64 = (1u64 << CGEventType::KeyDown.0)
         | (1u64 << CGEventType::KeyUp.0)
         | (1u64 << CGEventType::FlagsChanged.0);
+    // Listen-only preserves the historical observe-only behavior; a filtering
+    // tap may return null from the callback to swallow an event.
+    let options = if ctx.filter_events {
+        CGEventTapOptions::Default
+    } else {
+        CGEventTapOptions::ListenOnly
+    };
 
     let tap = unsafe {
         CGEvent::tap_create(
             CGEventTapLocation::HIDEventTap,
             CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::ListenOnly,
+            options,
             mask,
             Some(raw_callback),
             ctx_ptr as *mut c_void,
@@ -230,15 +258,24 @@ fn run_tap_thread(
     let tap = match tap {
         Some(t) => t,
         None => {
-            let _ = rl_tx.send(Err(Error::TapFailed(
-                "CGEventTapCreate returned null — \
-                 most likely Input Monitoring permission was revoked \
+            // A filtering tap failing here almost always means the
+            // Accessibility grant is missing — that is the authoritative
+            // check the proactive IOHIDCheckAccess cannot see.
+            let hint = if ctx.filter_events {
+                "filtering tap needs the Accessibility grant"
+            } else {
+                "most likely the keyboard-listening permission was revoked \
                  between the permission check and tap creation"
-                    .into(),
-            )));
+            };
+            let _ = rl_tx.send(Err(Error::TapFailed(format!(
+                "CGEventTapCreate returned null — {hint}"
+            ))));
             return;
         }
     };
+    // Let the callback reach the tap port for TapDisabledByTimeout recovery.
+    ctx.tap_port
+        .store(ptr::from_ref(&*tap) as *mut CFMachPort, Ordering::Release);
 
     let source = match CFMachPort::new_run_loop_source(None, Some(&tap), 0) {
         Some(s) => s,
@@ -286,6 +323,23 @@ unsafe extern "C-unwind" fn raw_callback(
     // and the pointer is valid for the entire life of the tap. The context
     // is only freed after this thread has joined.
     let ctx: &CallbackContext = unsafe { &*(user_info as *const CallbackContext) };
+
+    // The system disables a slow (filtering) tap and sends these notices;
+    // re-enabling is the documented recovery so suppression survives a hiccup.
+    if matches!(
+        event_type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
+        let port = ctx.tap_port.load(Ordering::Acquire);
+        if !port.is_null() {
+            // SAFETY: the port stays alive until the run loop stops, and the
+            // callback cannot fire after that.
+            let port_ref: &CFMachPort = unsafe { &*port };
+            CGEvent::tap_enable(port_ref, true);
+            log::debug!("keytap: event tap was disabled by the system; re-enabled");
+        }
+        return cg_event.as_ptr();
+    }
 
     // Decode keycode once; all three event types need it.
     let cg_event_ref: &CGEvent = unsafe { cg_event.as_ref() };
@@ -350,7 +404,15 @@ unsafe extern "C-unwind" fn raw_callback(
         }
     }
 
-    // ListenOnly — return value is ignored, but must be valid.
+    // Suppressed keys are reported to the receiver but never reach the
+    // foreground. Returning null is only honored for a filtering tap.
+    if ctx.filter_events
+        && matches!(event_type, CGEventType::KeyDown | CGEventType::KeyUp)
+        && crate::suppress::is_suppressed(key)
+    {
+        return ptr::null_mut();
+    }
+
     cg_event.as_ptr()
 }
 
