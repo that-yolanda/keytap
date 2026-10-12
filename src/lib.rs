@@ -34,7 +34,7 @@ pub mod chord;
 pub use error::Error;
 pub use event::{Event, EventKind};
 pub use key::{Key, RawCode};
-pub use suppress::{set_suppressed_keys, suppressed_keys};
+pub use suppress::{SuppressHandler, set_suppress_handler, set_suppressed_keys, suppressed_keys};
 pub use tap::{Tap, TapBuilder, TapIter};
 
 // Compile-time guarantees that the public types used across threads are

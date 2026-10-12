@@ -19,6 +19,20 @@ macro_rules! __ktap_debug {
 #[cfg(feature = "tracing")]
 #[macro_export]
 #[doc(hidden)]
+macro_rules! __ktap_error {
+    ($($t:tt)*) => { ::tracing::error!($($t)*) };
+}
+
+#[cfg(not(feature = "tracing"))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __ktap_error {
+    ($($t:tt)*) => {};
+}
+
+#[cfg(feature = "tracing")]
+#[macro_export]
+#[doc(hidden)]
 macro_rules! __ktap_trace {
     ($($t:tt)*) => { ::tracing::trace!($($t)*) };
 }
@@ -31,4 +45,5 @@ macro_rules! __ktap_trace {
 }
 
 pub(crate) use __ktap_debug as debug;
+pub(crate) use __ktap_error as error;
 pub(crate) use __ktap_trace as trace;
